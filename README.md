@@ -22,7 +22,7 @@ Paper: [arXiv:2605.07278](https://arxiv.org/abs/2605.07278)
 └── results/                  # result CSV summaries
 ```
 
-Checkpoints and datasets are not stored in the GitHub repository.  We release the main public checkpoint separately on Hugging Face.
+Checkpoints and datasets are not stored in the GitHub repository.  We release the main public checkpoint separately on [Hugging Face](https://huggingface.co/biubiu116/RC-aux).
 
 ## Installation
 
