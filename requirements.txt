@@ -1,5 +1,9 @@
 stable-worldmodel[train,env]
 stable-pretraining
+gymnasium<1.3
+stable-baselines3>=2.0
+datasets==3.6.0
+pyarrow==20.0.0
 hdf5plugin
 h5py
 hydra-core
