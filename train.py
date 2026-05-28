@@ -127,6 +127,10 @@ def run(cfg):
         dataset, lengths=[cfg.train_split, 1 - cfg.train_split], generator=rnd_gen
     )
 
+    if cfg.get("max_samples") is not None:
+        indices = torch.randperm(len(train_set), generator=rnd_gen)[:cfg.max_samples]
+        train_set = torch.utils.data.Subset(train_set, indices.tolist())
+
     train = torch.utils.data.DataLoader(train_set, **cfg.loader,shuffle=True, drop_last=True, generator=rnd_gen)
     val = torch.utils.data.DataLoader(val_set, **cfg.loader, shuffle=False, drop_last=False)
     

@@ -1,0 +1,30 @@
+# Ablation baseline: no direction loss, no scheduled sampling
+defaults:
+  - rcaux
+  - _self_
+
+output_model_name: ablation_baseline
+
+max_samples: 2000
+
+trainer:
+  max_epochs: 10
+
+loader:
+  batch_size: 8
+  num_workers: 0
+  persistent_workers: false
+  prefetch_factor: null
+  pin_memory: false
+
+wandb:
+  enabled: false
+
+loss:
+  reachability:
+    enabled: false
+  rollout:
+    curriculum_epochs: 3
+    direction_weight: 0.0
+    scheduled_sampling:
+      enabled: false

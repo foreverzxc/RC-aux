@@ -150,8 +150,20 @@ class JEPA(nn.Module):
         future_act_emb,
         horizon: int,
         history_size: int | None = None,
+        true_future_emb=None,
+        teacher_prob=0.0,
     ):
-        """Autoregressively predict future embeddings from latent/action embeddings."""
+        """Autoregressively predict future embeddings from latent/action embeddings.
+
+        Args:
+            emb_history: (B, HS, D) context embeddings from encoder
+            act_history: (B, HS, A) context action embeddings
+            future_act_emb: (B, H-1, A) future action embeddings (GT actions)
+            horizon: number of steps to predict
+            history_size: predictor context window
+            true_future_emb: (B, H, D) ground truth future embeddings for scheduled sampling
+            teacher_prob: probability of using true embedding instead of predicted (0=open-loop)
+        """
 
         if horizon < 1:
             raise ValueError(f"horizon must be >= 1, got {horizon}")
@@ -160,6 +172,7 @@ class JEPA(nn.Module):
         cur_emb = emb_history
         cur_act = act_history
         preds = []
+        use_teacher = teacher_prob > 0.0 and true_future_emb is not None
 
         for step in range(horizon):
             next_pred = self.predict(
@@ -170,7 +183,14 @@ class JEPA(nn.Module):
 
             if step + 1 < horizon:
                 next_act = future_act_emb[:, step : step + 1]
-                cur_emb = torch.cat([cur_emb, next_pred], dim=1)
+
+                # Scheduled sampling: randomly use true embedding instead of predicted
+                if use_teacher and torch.rand(1, device=next_pred.device).item() < teacher_prob:
+                    next_emb = true_future_emb[:, step:step + 1]
+                else:
+                    next_emb = next_pred
+
+                cur_emb = torch.cat([cur_emb, next_emb], dim=1)
                 cur_act = torch.cat([cur_act, next_act], dim=1)
 
         return torch.cat(preds, dim=1)

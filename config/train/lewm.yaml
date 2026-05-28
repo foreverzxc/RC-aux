@@ -99,6 +99,13 @@ loss:
     terminal_weight: 0.0
     terminal_pred_weight: 0.0
     terminal_neg_weight: 1.0
+  rollout:
+    direction_weight: 0.0          # weight for direction consistency loss
+    scheduled_sampling:
+      enabled: false
+      initial_prob: 0.5            # teacher forcing prob at epoch 0
+      final_prob: 0.0              # teacher forcing prob at end of curriculum
+      curriculum_epochs: 20        # decay initial_prob → final_prob over these epochs
   planner:
     goal_cost_reduce: terminal
     goal_cost_softmin_temperature: 1.0

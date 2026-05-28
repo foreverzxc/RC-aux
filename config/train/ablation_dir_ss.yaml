@@ -1,0 +1,14 @@
+# Ablation: direction consistency loss + scheduled sampling
+defaults:
+  - ablation_dir
+  - _self_
+
+output_model_name: ablation_dir_ss
+
+loss:
+  rollout:
+    scheduled_sampling:
+      enabled: true
+      initial_prob: 0.5
+      final_prob: 0.0
+      curriculum_epochs: 10

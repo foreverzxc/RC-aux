@@ -76,6 +76,38 @@ def one_step_prediction_loss(model, emb, act_emb, ctx_len):
     return step_losses.mean(), pred_emb, tgt_emb, step_losses
 
 
+def direction_consistency_loss(pred_emb, tgt_emb):
+    """Penalize mismatch between predicted and true embedding step directions.
+
+    For each step k, computes cosine similarity between:
+        pred_dir = ẑ_{t+k} - ẑ_{t+k-1}
+        true_dir = z_{t+k} - z_{t+k-1}
+    Loss = (1 - cosine_sim).mean() over all steps >= 2.
+
+    This encourages the predictor to move in the right direction even when
+    the absolute positions have drifted.
+
+    Args:
+        pred_emb: (B, H, D) rollout predictions
+        tgt_emb:  (B, H, D) ground truth targets
+    Returns:
+        scalar loss, or 0 if H < 2
+    """
+    if pred_emb.size(1) < 2:
+        return pred_emb.new_tensor(0.0)
+
+    pred_dirs = pred_emb[:, 1:] - pred_emb[:, :-1]  # (B, H-1, D)
+    true_dirs = tgt_emb[:, 1:] - tgt_emb[:, :-1]     # (B, H-1, D)
+
+    # Cosine similarity per step, averaged
+    cos_sim = torch.nn.functional.cosine_similarity(
+        pred_dirs.reshape(-1, pred_dirs.size(-1)),
+        true_dirs.reshape(-1, true_dirs.size(-1)),
+        dim=-1,
+    )
+    return (1.0 - cos_sim).mean()
+
+
 def open_loop_prediction_loss(module, emb, act_emb, cfg, rollout_horizon):
     ctx_len = cfg.wm.history_size
     init_emb = emb[:, :ctx_len]
@@ -83,12 +115,24 @@ def open_loop_prediction_loss(module, emb, act_emb, cfg, rollout_horizon):
     future_act = act_emb[:, ctx_len : ctx_len + rollout_horizon - 1]
     tgt_emb = emb[:, ctx_len : ctx_len + rollout_horizon]
 
+    # Scheduled sampling: compute teacher forcing probability for this batch
+    ss_cfg = cfg.loss.rollout.get("scheduled_sampling")
+    teacher_prob = 0.0
+    if ss_cfg is not None and ss_cfg.get("enabled", False):
+        init_prob = float(ss_cfg.get("initial_prob", 0.5))
+        final_prob = float(ss_cfg.get("final_prob", 0.0))
+        curriculum = max(1, int(ss_cfg.get("curriculum_epochs", 20)))
+        progress = min(1.0, float(module.current_epoch) / float(curriculum))
+        teacher_prob = init_prob + (final_prob - init_prob) * progress
+
     pred_emb = module.model.rollout_open_loop(
         init_emb,
         init_act,
         future_act,
         horizon=rollout_horizon,
         history_size=ctx_len,
+        true_future_emb=tgt_emb,
+        teacher_prob=teacher_prob,
     )
 
     step_losses = (pred_emb - tgt_emb).pow(2).mean(dim=(0, 2))
@@ -1262,7 +1306,7 @@ def rcaux_forward(self, batch, stage, cfg):
         anchor_loss = emb.new_tensor(0.0)
         prefix_loss = emb.new_tensor(0.0)
     elif pred_type == "multi_horizon":
-        pred_loss, pred_emb, _, step_losses, rollout_horizon = multi_horizon_prediction_loss(
+        pred_loss, pred_emb, tgt_emb, step_losses, rollout_horizon = multi_horizon_prediction_loss(
             self, emb, act_emb, cfg, stage
         )
 
@@ -1298,6 +1342,13 @@ def rcaux_forward(self, batch, stage, cfg):
     td_cfg = cfg.loss.get("temporal_distance")
     td_weight = float(td_cfg.weight) if td_cfg is not None else 0.0
 
+    # Direction consistency loss
+    dir_weight = float(cfg.loss.rollout.get("direction_weight", 0.0))
+    if dir_weight > 0.0 and pred_type == "multi_horizon" and rollout_horizon >= 2:
+        output["dir_loss"] = direction_consistency_loss(pred_emb, tgt_emb)
+    else:
+        output["dir_loss"] = emb.new_tensor(0.0)
+
     anchor_weight = float(cfg.loss.rollout.get("one_step_anchor_weight", 0.0))
     prefix_weight = float(cfg.loss.rollout.get("prefix_weight", 0.0))
     output["loss"] = (
@@ -1308,6 +1359,7 @@ def rcaux_forward(self, batch, stage, cfg):
         + reach_weight * output["reach_loss"]
         + ground_weight * output["ground_loss"]
         + td_weight * output["td_loss"]
+        + dir_weight * output["dir_loss"]
     )
     output["pred_last_loss"] = step_losses[-1]
     output["pred_horizon"] = emb.new_tensor(float(rollout_horizon))

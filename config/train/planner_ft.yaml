@@ -1,0 +1,37 @@
+# Planner fine-tuning config — inherits from lewm for WM/dataset settings
+defaults:
+  - lewm
+  - _self_
+
+output_model_name: planner_ft
+
+# Limit dataset for quick experiments (null = full dataset)
+max_samples: 10
+
+# Shorter training
+trainer:
+  max_epochs: 20
+
+loader:
+  batch_size: 2
+  num_workers: 0
+  persistent_workers: false
+  prefetch_factor: null
+  pin_memory: false
+
+# Planner architecture
+planner:
+  ckpt_path: ???
+  num_queries: 8
+  num_layers: 3
+  num_heads: 8
+  mlp_dim: 1024
+  horizon: 5
+  action_dim: null               # auto-detect from WM
+  action_substeps: 1
+  action_range: 1.0
+  dropout: 0.1
+  diversity_weight: 0.1
+  conf_weight: 0.5
+  stage: ft                       # "sft" (action imitation) or "ft" (WM rollout)
+  goal_mode: clip_last            # "clip_last" or "episode_final"

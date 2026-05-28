@@ -1,0 +1,33 @@
+# Python
+__pycache__/
+*.pyc
+
+# Virtual environment
+.venv/
+
+# Framework outputs
+lightning_logs/
+outputs/
+wandb/
+
+# Generated viz output
+output/
+
+# Checkpoints
+checkpoints/
+*.ckpt
+
+# Experiment snapshots (archived, not tracked)
+experiments/
+
+# IDE
+.vscode/
+
+# Symlinks
+/models
+
+# Misc generated
+*.png
+*.gif
+*.mp4
+*.html
