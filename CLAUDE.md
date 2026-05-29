@@ -7,20 +7,19 @@
 RC-aux 使用独立的 uv 虚拟环境（Python 3.10.20，所有依赖已安装）。
 
 ```bash
-cd /home/cyborg/WM/RC-aux
+cd /root/RC-aux
 source .venv/bin/activate
 ```
 
 关键包版本：
 | 包 | 版本 | 备注 |
 |---|------|------|
-| torch | 2.6.0+cu124 | CUDA 12.4 |
-| transformers | 5.5.4 | **必须此版本**，5.9.0 会导致 `ViTEncoder` 属性错误 |
+| torch | 2.12.0+cu130 | CUDA 13.0 |
+| transformers | 5.9.0 | |
 | stable-worldmodel | 0.0.6 | 包含 Cube/PushT 环境和 HDF5Dataset |
 | stable-pretraining | 0.1.6 | DataModule, Compose, Callback |
-| lightning | 2.5.2 | |
-| mujoco | 3.7.0 | |
-| ogbench | 1.2.1 | Cube 仿真后端 |
+| lightning | 2.6.5 | |
+| hydra | 1.3.2 | |
 
 如果缺包，用 `uv pip install <pkg>` 安装。
 
@@ -32,11 +31,13 @@ RC-aux/
 ├── .venv/                           # uv 虚拟环境（Python 3.10）
 ├── planner.py                       # PlannerDecoder + PlannerLoss + planner_rollout（从 le-wm 复制）
 ├── train_planner.py                 # Planner 训练入口（独立 Lightning，不依赖 spt.Module）
-├── models/                           # → my_models/RC-aux/rcaux/ (symlink，预训练权重)
 ├── checkpoints/
-│   └── planner_overfit_cube.pt      # Cube 过拟合权重（700 epoch, 10 samples）
+│   ├── lewm_cube_object.ckpt        # LE-WM 预训练权重
+│   └── rcaux_cube_object.ckpt       # RC-aux 预训练权重
 ├── experiments/archive/             # 历史实验快照（environment/requirements/loss）
-├── config/train/planner_ft.yaml     # Planner 训练配置（继承 lewm.yaml）
+├── config/train/
+│   ├── lewm.yaml                    # 基础配置（全部训练共享）
+│   └── planner_ft.yaml             # Planner 训练配置（继承 lewm.yaml）
 ├── scripts/
 │   └── viz/
 │       ├── __init__.py
@@ -47,16 +48,30 @@ RC-aux/
 └── output/viz/                      # 可视化输出（gitignored）
 ```
 
+## 输出目录
+
+所有训练输出（权重、日志、Hydra 配置快照）统一写入：
+
+```
+/root/autodl-tmp/rcaux-outputs/<YYYY-MM-DD_HH-MM-SS>/
+```
+
+由 `config/train/lewm.yaml` 中的 `hydra.run.dir` 控制。每次训练自动创建时间戳子目录，
+包含：
+- `checkpoints/` — ModelCheckpoint 保存的 planner 权重（top-3 val/loss + last）
+- `.hydra/` — Hydra 配置快照
+- `lightning_logs/` — Lightning 日志
+
 ## 运行方式
 
 ### Planner 训练
 
 ```bash
-cd /home/cyborg/WM/RC-aux
+cd /root/RC-aux
 source .venv/bin/activate
 
 python train_planner.py --config-name planner_ft data=ogb \
-    planner.ckpt_path=models/checkpoints/pixel_control/cube_rcaux/rcaux_cube_object.ckpt \
+    planner.ckpt_path=checkpoints/rcaux_cube_object.ckpt \
     trainer.max_epochs=200 wandb.enabled=false max_samples=50
 ```
 
@@ -67,12 +82,12 @@ source .venv/bin/activate
 
 # 训练集样本
 python scripts/viz/run.py cube \
-    --wm models/checkpoints/pixel_control/cube_rcaux/rcaux_cube_object.ckpt \
+    --wm checkpoints/rcaux_cube_object.ckpt \
     --planner checkpoints/planner_overfit_cube.pt --idx 58794
 
 # 未见过样本
 python scripts/viz/run.py cube \
-    --wm .../cube_rcaux/rcaux_cube_object.ckpt \
+    --wm checkpoints/rcaux_cube_object.ckpt \
     --planner checkpoints/planner_overfit_cube.pt --idx 405000
 ```
 
@@ -114,14 +129,11 @@ Cube 环境（`swm/OGBCube-v0`）的数据重放需要以下特殊处理：
 
 ## Checkpoint 路径
 
-预训练权重通过 symlink `models/ → my_models/RC-aux/rcaux/` 访问：
-
-| 任务 | 路径 |
+| 用途 | 路径 |
 |------|------|
-| Cube | `models/checkpoints/pixel_control/cube_rcaux/rcaux_cube_object.ckpt` |
-| Wall | `models/checkpoints/pixel_control/wall_rcaux/rcaux_wall_object.ckpt` |
-| Reacher | `models/checkpoints/pixel_control/reacher_rcaux/rcaux_reacher_object.ckpt` |
-| TwoRoom | `models/checkpoints/pixel_control/tworoom_rcaux/rcaux_tworoom_weights.ckpt` |
+| RC-aux WM (Cube) | `checkpoints/rcaux_cube_object.ckpt` |
+| LE-WM (Cube) | `checkpoints/lewm_cube_object.ckpt` |
+| Planner 训练输出 | `/root/autodl-tmp/rcaux-outputs/<timestamp>/checkpoints/` |
 
 ## 数据集路径
 

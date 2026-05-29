@@ -5,6 +5,13 @@ defaults:
 output_model_name: lewm
 subdir: ${hydra:job.id}
 
+# Redirect all Hydra outputs to autodl-tmp
+hydra:
+  run:
+    dir: /root/autodl-tmp/rcaux-outputs/${now:%Y-%m-%d_%H-%M-%S}
+  sweep:
+    dir: /root/autodl-tmp/rcaux-outputs/${now:%Y-%m-%d_%H-%M-%S}
+
 num_workers: 6
 train_split: 0.9
 seed: 3072

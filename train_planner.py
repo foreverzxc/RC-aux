@@ -242,7 +242,17 @@ def run(cfg):
         **OmegaConf.to_container(cfg.trainer, resolve=True),
         num_sanity_val_steps=1,
         logger=logger,
-        enable_checkpointing=False,
+        enable_checkpointing=True,
+        callbacks=[
+            pl.callbacks.ModelCheckpoint(
+                dirpath=os.path.join(os.getcwd(), "checkpoints"),
+                filename="planner-{epoch:03d}-{val/loss:.4f}",
+                save_top_k=3,
+                monitor="val/loss",
+                mode="min",
+                save_last=True,
+            ),
+        ],
     )
 
     trainer.fit(pl_module, train, val)
