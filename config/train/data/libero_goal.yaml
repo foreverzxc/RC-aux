@@ -1,0 +1,19 @@
+# LIBERO-Goal dataset config for World Model training.
+# Uses LiberoGoalDataset (custom native HDF5 reader) instead of HDF5Dataset.
+#
+# Usage:
+#   python train.py --config-name ablation_baseline data=libero_goal
+
+dataset_type: libero_goal
+
+dataset:
+  data_dir: data/libero_goal   # resolved relative to project root by train.py
+  num_steps: ${eval:'${wm.num_preds} + ${wm.history_size}'}
+  frameskip: 5
+  keys_to_load:
+    - pixels
+    - action
+    - proprio
+  keys_to_cache:
+    - action
+    - proprio

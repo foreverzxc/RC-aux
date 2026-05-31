@@ -5,17 +5,17 @@ defaults:
 
 output_model_name: ablation_baseline
 
-max_samples: 2000
+max_samples: 10000
 
 trainer:
   max_epochs: 10
 
 loader:
-  batch_size: 8
-  num_workers: 0
-  persistent_workers: false
-  prefetch_factor: null
-  pin_memory: false
+  batch_size: 64
+  num_workers: 8
+  persistent_workers: true
+  prefetch_factor: 4
+  pin_memory: true
 
 wandb:
   enabled: false

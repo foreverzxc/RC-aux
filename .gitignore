@@ -14,7 +14,8 @@ wandb/
 output/
 
 # Checkpoints
-checkpoints/
+checkpoints
+/data/
 *.ckpt
 
 # Experiment snapshots (archived, not tracked)
@@ -31,3 +32,4 @@ experiments/
 *.gif
 *.mp4
 *.html
+

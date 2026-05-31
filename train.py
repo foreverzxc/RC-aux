@@ -1,7 +1,9 @@
 import os
+from datetime import datetime
 from functools import partial
 from pathlib import Path
 
+import h5py
 import hydra
 import lightning as pl
 import stable_pretraining as spt
@@ -9,6 +11,18 @@ import stable_worldmodel as swm
 import torch
 from lightning.pytorch.loggers import WandbLogger
 from omegaconf import OmegaConf, open_dict
+
+# Patch: disable SWMR mode on HDF5 to avoid NFS lock contention with multiple workers.
+# SWMR is only needed for concurrent write+read; we only do reads.
+_orig_open_h5 = swm.data.HDF5Dataset._open_h5
+def _patched_open_h5(self):
+    if self.is_remote:
+        import fsspec
+        scheme = self.h5_path.split('://', 1)[0]
+        fs = fsspec.filesystem(scheme, **self.storage_options)
+        return h5py.File(fs.open(self.h5_path, 'rb'), 'r')
+    return h5py.File(self.h5_path, 'r', rdcc_nbytes=256 * 1024 * 1024)
+swm.data.HDF5Dataset._open_h5 = _patched_open_h5
 
 from jepa import JEPA
 from module import (
@@ -21,6 +35,7 @@ from module import (
     SIGReg,
     TemporalDistanceHead,
 )
+from libero_dataset import LiberoGoalDataset
 from rcaux import maybe_expand_num_preds, maybe_freeze_for_reachability, rcaux_forward
 from utils import get_column_normalizer, get_img_preprocessor, ModelObjectCallBack
 
@@ -106,9 +121,21 @@ def run(cfg):
     if use_rcaux:
         maybe_expand_num_preds(cfg)
 
-    dataset = swm.data.HDF5Dataset(**cfg.data.dataset, transform=None)
+    dataset_kwargs = dict(cfg.data.dataset)
+
+    if cfg.data.get("dataset_type") == "libero_goal":
+        # Resolve data_dir relative to project root (Hydra changes CWD)
+        import os as _os
+        _proj_root = _os.path.dirname(_os.path.abspath(__file__))
+        dataset_kwargs["data_dir"] = _os.path.join(
+            _proj_root, dataset_kwargs["data_dir"]
+        )
+        dataset = LiberoGoalDataset(**dataset_kwargs, transform=None)
+    else:
+        dataset = swm.data.HDF5Dataset(**dataset_kwargs, transform=None)
+
     transforms = [get_img_preprocessor(source='pixels', target='pixels', img_size=cfg.img_size)]
-    
+
     with open_dict(cfg):
         for col in cfg.data.dataset.keys_to_load:
             if col.startswith("pixels"):
@@ -251,8 +278,11 @@ def run(cfg):
         optim=optimizers,
     )
 
-    run_id = cfg.get("subdir") or ""
-    run_dir = Path(swm.data.utils.get_cache_dir(), run_id)
+    # Save checkpoints to project checkpoints/<YYYY-MM-DD_HH-MM-SS>/
+    _proj_checkpoint_dir = (
+        Path(os.path.dirname(os.path.abspath(__file__))) / "checkpoints"
+    )
+    run_dir = _proj_checkpoint_dir / datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
 
     logger = None
     if cfg.wandb.enabled:
@@ -278,12 +308,21 @@ def run(cfg):
         enable_checkpointing=True,
     )
 
+    # Redirect spt.Manager checkpoints into the same timestamp directory
+    spt.set(cache_dir=str(run_dir))
+
+    # Resume checkpoint path (absolute). Only used when explicitly set via CLI:
+    #   python train.py ... resume_ckpt=/path/to/weights.ckpt
+    resume_ckpt = cfg.get("resume_ckpt")
+    if resume_ckpt:
+        resume_ckpt = str(Path(resume_ckpt).expanduser().resolve())
+
     manager = spt.Manager(
         trainer=trainer,
         module=world_model,
         data=data_module,
         seed=cfg.seed,
-        ckpt_path=run_dir / f"{cfg.output_model_name}_weights.ckpt",
+        ckpt_path=resume_ckpt,
     )
 
     manager()

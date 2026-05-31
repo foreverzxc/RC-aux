@@ -2,19 +2,42 @@
 
 Usage:
     python train_planner.py --config-name planner_ft data=pusht \
-        planner.ckpt_path=/path/to/object.ckpt
+        planner.ckpt_path=checkpoints/rcaux_cube_object.ckpt
 """
 
 import os
-from pathlib import Path
+import sys
+
+# Ensure h5py can find blosc plugin bundled with hdf5plugin
+_hdf5_plugin_dir = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)),
+    ".venv/lib/python3.10/site-packages/hdf5plugin/plugins",
+)
+if os.path.isdir(_hdf5_plugin_dir):
+    os.environ.setdefault("HDF5_PLUGIN_PATH", _hdf5_plugin_dir)
+
+# Project root for resolving relative paths (e.g. checkpoints/ symlink)
+PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
 
 import h5py as _h5py
 import hydra
 import lightning as pl
+import lightning.pytorch.callbacks as pl_callbacks
 import stable_pretraining as spt
 import stable_worldmodel as swm
 import torch
 from omegaconf import OmegaConf
+
+# Patch: disable SWMR mode to avoid NFS lock contention with multiple workers
+_orig_open_h5_planner = swm.data.HDF5Dataset._open_h5
+def _patched_open_h5_planner(self):
+    if self.is_remote:
+        import fsspec
+        scheme = self.h5_path.split('://', 1)[0]
+        fs = fsspec.filesystem(scheme, **self.storage_options)
+        return _h5py.File(fs.open(self.h5_path, 'rb'), 'r')
+    return _h5py.File(self.h5_path, 'r', rdcc_nbytes=256 * 1024 * 1024)
+swm.data.HDF5Dataset._open_h5 = _patched_open_h5_planner
 
 from planner import PlannerDecoder, PlannerLoss, planner_rollout
 from utils import get_img_preprocessor
@@ -240,12 +263,13 @@ def run(cfg):
 
     trainer = pl.Trainer(
         **OmegaConf.to_container(cfg.trainer, resolve=True),
-        num_sanity_val_steps=1,
+        default_root_dir=PROJECT_ROOT,
+        num_sanity_val_steps=0,
         logger=logger,
         enable_checkpointing=True,
         callbacks=[
-            pl.callbacks.ModelCheckpoint(
-                dirpath=os.path.join(os.getcwd(), "checkpoints"),
+            pl_callbacks.ModelCheckpoint(
+                dirpath="checkpoints",
                 filename="planner-{epoch:03d}-{val/loss:.4f}",
                 save_top_k=3,
                 monitor="val/loss",
