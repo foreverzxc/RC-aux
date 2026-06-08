@@ -13,16 +13,16 @@ from lightning.pytorch.loggers import WandbLogger
 from omegaconf import OmegaConf, open_dict
 
 # Patch: disable SWMR mode on HDF5 to avoid NFS lock contention with multiple workers.
-# SWMR is only needed for concurrent write+read; we only do reads.
-_orig_open_h5 = swm.data.HDF5Dataset._open_h5
-def _patched_open_h5(self):
-    if self.is_remote:
-        import fsspec
-        scheme = self.h5_path.split('://', 1)[0]
-        fs = fsspec.filesystem(scheme, **self.storage_options)
-        return h5py.File(fs.open(self.h5_path, 'rb'), 'r')
-    return h5py.File(self.h5_path, 'r', rdcc_nbytes=256 * 1024 * 1024)
-swm.data.HDF5Dataset._open_h5 = _patched_open_h5
+if hasattr(swm.data.HDF5Dataset, "_open_h5"):
+    _orig_open_h5 = swm.data.HDF5Dataset._open_h5
+    def _patched_open_h5(self):
+        if self.is_remote:
+            import fsspec
+            scheme = self.h5_path.split('://', 1)[0]
+            fs = fsspec.filesystem(scheme, **self.storage_options)
+            return h5py.File(fs.open(self.h5_path, 'rb'), 'r')
+        return h5py.File(self.h5_path, 'r', rdcc_nbytes=256 * 1024 * 1024)
+    swm.data.HDF5Dataset._open_h5 = _patched_open_h5
 
 from jepa import JEPA
 from module import (
@@ -31,6 +31,7 @@ from module import (
     Embedder,
     GroundingHead,
     MLP,
+    PlannerHead,
     ReachabilityHead,
     SIGReg,
     TemporalDistanceHead,
@@ -38,6 +39,10 @@ from module import (
 from libero_dataset import LiberoGoalDataset
 from rcaux import maybe_expand_num_preds, maybe_freeze_for_reachability, rcaux_forward
 from utils import get_column_normalizer, get_img_preprocessor, ModelObjectCallBack
+
+# Suppress auto-saved environment.json / requirements_frozen.txt
+import stable_pretraining.callbacks.env_info as _env_info_cb
+_env_info_cb.EnvironmentDumpCallback.setup = lambda *a, **k: None
 
 
 def lejepa_forward(self, batch, stage, cfg):
@@ -227,6 +232,24 @@ def run(cfg):
             max_horizon=td_cfg.max_horizon,
         )
 
+    ph_cfg = cfg.loss.get("planner_head")
+    planner_head = None
+    if ph_cfg is not None and ph_cfg.enabled:
+        planner_head = PlannerHead(
+            embed_dim=embed_dim,
+            query_dim=ph_cfg.get("query_dim", 32),
+            num_queries=ph_cfg.num_queries,
+            horizon=ph_cfg.horizon,
+            action_dim=effective_act_dim,
+            action_substeps=ph_cfg.get("action_substeps", 1),
+            action_range=ph_cfg.get("action_range", 1.0),
+            head_type=ph_cfg.get("type", "decoder"),
+            num_layers=ph_cfg.num_layers,
+            num_heads=ph_cfg.get("num_heads", 8),
+            mlp_dim=ph_cfg.mlp_dim,
+            dropout=ph_cfg.get("dropout", 0.1),
+        )
+
     world_model = JEPA(
         encoder=encoder,
         predictor=predictor,
@@ -236,6 +259,7 @@ def run(cfg):
         reachability_head=reachability_head,
         grounding_head=grounding_head,
         temporal_distance_head=temporal_distance_head,
+        planner_head=planner_head,
         use_reachability_cost=bool(
             reach_cfg is not None
             and reach_cfg.enabled
@@ -308,8 +332,8 @@ def run(cfg):
         enable_checkpointing=True,
     )
 
-    # Redirect spt.Manager checkpoints into the same timestamp directory
-    spt.set(cache_dir=str(run_dir))
+    # Note: spt.set(cache_dir=...) not available in this stable-pretraining version.
+    # Checkpoints are saved to run_dir by ModelObjectCallBack below.
 
     # Resume checkpoint path (absolute). Only used when explicitly set via CLI:
     #   python train.py ... resume_ckpt=/path/to/weights.ckpt

@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "Read(//home/cyborg/WM/my_models/RC-aux/rcaux/checkpoints/**)",
+      "Read(//home/cyborg/WM/my_models/RC-aux/rcaux/checkpoints/libero_goal/**)"
+    ]
+  }
+}

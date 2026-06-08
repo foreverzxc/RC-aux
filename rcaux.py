@@ -1,5 +1,6 @@
 from omegaconf import open_dict
 import torch
+from planner import PlannerLoss, planner_rollout
 
 
 def maybe_expand_num_preds(cfg):
@@ -74,39 +75,6 @@ def one_step_prediction_loss(model, emb, act_emb, ctx_len):
     pred_emb = model.predict(ctx_emb, ctx_act)
     step_losses = (pred_emb - tgt_emb).pow(2).mean(dim=(0, 2))
     return step_losses.mean(), pred_emb, tgt_emb, step_losses
-
-
-def direction_consistency_loss(pred_emb, tgt_emb):
-    """Penalize mismatch between predicted and true embedding step directions.
-
-    For each step k, computes cosine similarity between:
-        pred_dir = ẑ_{t+k} - ẑ_{t+k-1}
-        true_dir = z_{t+k} - z_{t+k-1}
-    Loss = (1 - cosine_sim).mean() over all steps >= 2.
-
-    This encourages the predictor to move in the right direction even when
-    the absolute positions have drifted.
-
-    Args:
-        pred_emb: (B, H, D) rollout predictions
-        tgt_emb:  (B, H, D) ground truth targets
-    Returns:
-        scalar loss, or 0 if H < 2
-    """
-    if pred_emb.size(1) < 2:
-        return pred_emb.new_tensor(0.0)
-
-    pred_dirs = pred_emb[:, 1:] - pred_emb[:, :-1]  # (B, H-1, D)
-    true_dirs = tgt_emb[:, 1:] - tgt_emb[:, :-1]     # (B, H-1, D)
-
-    # Cosine similarity per step, averaged
-    cos_sim = torch.nn.functional.cosine_similarity(
-        pred_dirs.reshape(-1, pred_dirs.size(-1)),
-        true_dirs.reshape(-1, true_dirs.size(-1)),
-        dim=-1,
-    )
-    return (1.0 - cos_sim).mean()
-
 
 def open_loop_prediction_loss(module, emb, act_emb, cfg, rollout_horizon):
     ctx_len = cfg.wm.history_size
@@ -1264,6 +1232,106 @@ def temporal_distance_loss(module, emb, pred_emb, cfg):
     return loss, stats
 
 
+def planner_head_loss(module, batch, emb, cfg, pred_gt=None):
+    """Joint planner + WM training loss.
+
+    Two-stage design (controlled by ``freeze_wm_for_planner``):
+    - Stage 1 (freeze=true): planner → stop_grad(emb). WM learns from pred_loss,
+      planner learns from sft_loss only. WM is a reliable world model first.
+    - Stage 2 (freeze=false): full gradient flow. Planner uses WM rollout as a
+      differentiable simulator to discover better-than-GT actions.
+
+    Args:
+        pred_gt: (B, H, D)  GT-action rollout result from open-loop prediction.
+    """
+    ph_cfg = cfg.loss.get("planner_head")
+    if ph_cfg is None or not ph_cfg.enabled:
+        return emb.new_tensor(0.0), {}
+    if getattr(module.model, "planner_head", None) is None:
+        return emb.new_tensor(0.0), {}
+
+    freeze_wm = bool(ph_cfg.get("freeze_wm_for_planner", True))
+    hs = cfg.wm.history_size
+
+    _emb = emb.detach() if freeze_wm else emb
+    # L2-normalize: project onto unit sphere. Encoder can scale/shift freely,
+    # planner only sees angular relationships, which change much slower.
+    _emb = torch.nn.functional.normalize(_emb, dim=-1)
+    ctx_emb = _emb[:, :hs]
+    goal_emb = _emb[:, -1:]  # clip_last mode
+
+    actions, conf = module.model.plan_actions(ctx_emb, goal_emb)
+    hist_actions = batch["action"][:, :hs]
+    info = {"pixels": batch["pixels"][:, :hs]} if "pixels" in batch else {}
+
+    pred_embs, _ = planner_rollout(
+        module.model, actions, info, history_size=hs,
+        hist_actions=hist_actions, goal_emb=goal_emb, ctx_emb=ctx_emb,
+    )
+
+    B, N, Hp, D = pred_embs.shape
+
+    # ── Stage 1: diversity + SFT only (no best_cost, no align) ──
+    # ── Stage 2: best_cost + align + diversity + SFT           ──
+    if freeze_wm:
+        # Stage 1: planner learns from SFT + diversity, detached from WM.
+        # Use SFT loss to select best_idx (NOT WM rollout — WM is untrained
+        # and its costs are random, scattering SFT signal across queries).
+        div_weight = float(ph_cfg.get("diversity_weight", 0.1))
+        gt_all = batch["action"][:, hs:]
+        Hg = min(Hp, gt_all.shape[1])
+        gt_actions = gt_all[:, :Hg]
+        sft_per_query = (actions[:, :, :Hg] - gt_actions.unsqueeze(1)).pow(2).mean(dim=[-2, -1])
+        best_idx = sft_per_query.argmin(dim=-1)
+
+        flat_acts = actions.reshape(B, N, -1)
+        flat_acts = torch.nn.functional.normalize(flat_acts, dim=-1)
+        cos_mat = flat_acts @ flat_acts.transpose(-2, -1)
+        off_mask = ~torch.eye(N, dtype=torch.bool, device=actions.device)
+        div_loss = cos_mat[:, off_mask].pow(2).mean()
+
+        loss = div_weight * div_loss
+        stats = {"best_cost": (pred_embs - goal_emb.unsqueeze(1)).pow(2).mean(dim=-1).mean(dim=-1).min(dim=-1).values.mean().detach(),
+                 "diversity": div_loss.detach()}
+    else:
+        # Stage 2: full PlannerLoss with WM rollout optimization
+        planner_loss_fn = PlannerLoss(
+            diversity_weight=float(ph_cfg.get("diversity_weight", 0.1)),
+            conf_weight=float(ph_cfg.get("conf_weight", 0.5)),
+        )
+        loss, stats = planner_loss_fn(actions, pred_embs, goal_emb, conf)
+        best_idx = (pred_embs - goal_emb.unsqueeze(1)).pow(2).mean(dim=-1).mean(dim=-1).argmin(dim=-1)
+
+    # ── SFT: planner action → GT action (always active) ──
+    sft_weight = float(ph_cfg.get("sft_weight", 1.0))
+    if sft_weight > 0.0:
+        gt_all = batch["action"][:, hs:]
+        Hg = min(Hp, gt_all.shape[1])
+        gt_actions = gt_all[:, :Hg]
+        if not freeze_wm:
+            # Stage 2: best_idx from WM rollout
+            costs = (pred_embs - goal_emb.unsqueeze(1)).pow(2).mean(dim=-1).mean(dim=-1)
+            best_idx = costs.argmin(dim=-1)
+        # Stage 1: best_idx already computed from SFT (above)
+        plan_best = actions[torch.arange(B), best_idx, :Hg]
+        sft_loss = (plan_best - gt_actions).pow(2).mean()
+        loss = loss + sft_weight * sft_loss
+        stats["sft_loss"] = sft_loss.detach()
+
+    # ── Emb alignment: planner rollout → GT rollout in embedding space ──
+    align_weight = float(ph_cfg.get("align_weight", 0.0))
+    if align_weight > 0.0 and pred_gt is not None:
+        Hg = min(Hp, pred_gt.shape[1])
+        # Align ALL queries' rollouts to GT trajectory (not just best)
+        align_loss = (pred_embs[:, :, :Hg] - pred_gt[:, :Hg].unsqueeze(1).detach()).pow(2).mean()
+        loss = loss + align_weight * align_loss
+        stats["align_loss"] = align_loss.detach()
+
+    stats = {f"planner_{k}": v.detach() for k, v in stats.items()
+             if isinstance(v, torch.Tensor)}
+    return loss, stats
+
+
 def maybe_freeze_for_reachability(model, cfg):
     reach_cfg = cfg.loss.get("reachability")
     if reach_cfg is None or not reach_cfg.enabled:
@@ -1336,18 +1404,14 @@ def rcaux_forward(self, batch, stage, cfg):
     output["reach_loss"], reach_stats = reachability_loss(self, emb, pred_emb, cfg)
     output["ground_loss"], ground_stats = grounding_loss(self, batch, emb, pred_emb, cfg)
     output["td_loss"], td_stats = temporal_distance_loss(self, emb, pred_emb, cfg)
+    output["planner_loss"], planner_stats = planner_head_loss(self, batch, emb, cfg, pred_emb)
     reach_weight = float(reach_cfg.weight) if reach_cfg is not None else 0.0
     ground_cfg = cfg.loss.get("grounding")
     ground_weight = float(ground_cfg.weight) if ground_cfg is not None else 0.0
     td_cfg = cfg.loss.get("temporal_distance")
     td_weight = float(td_cfg.weight) if td_cfg is not None else 0.0
-
-    # Direction consistency loss
-    dir_weight = float(cfg.loss.rollout.get("direction_weight", 0.0))
-    if dir_weight > 0.0 and pred_type == "multi_horizon" and rollout_horizon >= 2:
-        output["dir_loss"] = direction_consistency_loss(pred_emb, tgt_emb)
-    else:
-        output["dir_loss"] = emb.new_tensor(0.0)
+    ph_cfg = cfg.loss.get("planner_head")
+    planner_weight = float(ph_cfg.get("weight", 1.0)) if ph_cfg is not None else 0.0
 
     anchor_weight = float(cfg.loss.rollout.get("one_step_anchor_weight", 0.0))
     prefix_weight = float(cfg.loss.rollout.get("prefix_weight", 0.0))
@@ -1359,7 +1423,7 @@ def rcaux_forward(self, batch, stage, cfg):
         + reach_weight * output["reach_loss"]
         + ground_weight * output["ground_loss"]
         + td_weight * output["td_loss"]
-        + dir_weight * output["dir_loss"]
+        + planner_weight * output["planner_loss"]
     )
     output["pred_last_loss"] = step_losses[-1]
     output["pred_horizon"] = emb.new_tensor(float(rollout_horizon))
@@ -1371,6 +1435,8 @@ def rcaux_forward(self, batch, stage, cfg):
     for key, value in ground_stats.items():
         losses_dict[f"{stage}/{key}"] = value.detach()
     for key, value in td_stats.items():
+        losses_dict[f"{stage}/{key}"] = value.detach()
+    for key, value in planner_stats.items():
         losses_dict[f"{stage}/{key}"] = value.detach()
     self.log_dict(losses_dict, on_step=True, sync_dist=True)
     return output

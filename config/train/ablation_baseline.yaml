@@ -1,4 +1,4 @@
-# Ablation baseline: no direction loss, no scheduled sampling
+# Ablation baseline: no scheduled sampling
 defaults:
   - rcaux
   - _self_
@@ -25,6 +25,5 @@ loss:
     enabled: false
   rollout:
     curriculum_epochs: 3
-    direction_weight: 0.0
     scheduled_sampling:
       enabled: false

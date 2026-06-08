@@ -32,4 +32,6 @@ experiments/
 *.gif
 *.mp4
 *.html
+environment*.json
+requirements_frozen*.txt
 

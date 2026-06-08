@@ -438,6 +438,129 @@ class MLP(nn.Module):
         return self.net(x)
 
 
+class PlannerHead(nn.Module):
+    """Action planner head — Perceiver-style queries → action sequences.
+
+    Two variants controlled by ``head_type``:
+    - ``"mlp"`` (default): queries interact with pooled memory via residual MLP
+    - ``"decoder"``: TransformerDecoder (self-attn + cross-attn + FFN)
+
+    Both share the same action_head and conf_head.
+    """
+
+    def __init__(
+        self,
+        embed_dim: int = 192,
+        query_dim: int = 32,
+        num_queries: int = 8,
+        horizon: int = 5,
+        action_dim: int = 7,
+        action_substeps: int = 1,
+        action_range: float = 1.0,
+        head_type: str = "decoder",
+        num_layers: int = 3,
+        num_heads: int = 8,
+        mlp_dim: int = 1024,
+        dropout: float = 0.1,
+    ):
+        super().__init__()
+        self.num_queries = num_queries
+        self.horizon = horizon
+        self.action_dim = action_dim
+        self.action_substeps = action_substeps
+        self.embed_dim = embed_dim
+        self.query_dim = query_dim
+        self.action_range = action_range
+        self.head_type = head_type
+
+        # Learnable query tokens
+        self.query_embed = nn.Parameter(torch.randn(1, num_queries, query_dim) * 0.02)
+
+        # Input projection for memory [goal, ctx] → query space
+        self.input_proj = nn.Linear(embed_dim, query_dim)
+
+        # Core interaction module
+        if head_type == "decoder":
+            decoder_layer = nn.TransformerDecoderLayer(
+                d_model=query_dim,
+                nhead=num_heads,
+                dim_feedforward=mlp_dim,
+                dropout=dropout,
+                activation="gelu",
+                batch_first=True,
+            )
+            self.core = nn.TransformerDecoder(decoder_layer, num_layers=num_layers)
+        elif head_type == "mlp":
+            self.core = nn.ModuleList([
+                nn.Sequential(
+                    nn.Linear(3 * query_dim, mlp_dim),
+                    nn.GELU(),
+                    nn.Dropout(dropout),
+                    nn.Linear(mlp_dim, query_dim),
+                    nn.Dropout(dropout),
+                )
+                for _ in range(num_layers)
+            ])
+        else:
+            raise ValueError(f"Unknown PlannerHead type: {head_type}")
+
+        # Output head: query → action sequence
+        self.action_head = nn.Sequential(
+            nn.Linear(query_dim, mlp_dim),
+            nn.GELU(),
+            nn.Linear(mlp_dim, horizon * action_substeps * action_dim),
+        )
+        nn.init.normal_(self.action_head[2].weight, std=0.01)
+        nn.init.zeros_(self.action_head[2].bias)
+
+        # Confidence head
+        self.conf_head = nn.Sequential(
+            nn.Linear(query_dim, mlp_dim // 4),
+            nn.GELU(),
+            nn.Linear(mlp_dim // 4, 1),
+        )
+
+    def forward(self, ctx_emb: torch.Tensor, goal_emb: torch.Tensor):
+        """Produce N action sequence candidates.
+
+        Args:
+            ctx_emb:  (B, HS, D)  context embeddings
+            goal_emb: (B, 1, D)   goal embedding
+
+        Returns:
+            actions: (B, N, horizon, action_substeps * action_dim)
+            conf:    (B, N, 1)  logits
+        """
+        B = ctx_emb.size(0)
+        N = self.num_queries
+
+        # Memory: [goal, ctx]
+        memory = torch.cat([self.input_proj(goal_emb), self.input_proj(ctx_emb)], dim=1)
+        queries = self.query_embed.expand(B, -1, -1)
+
+        if self.head_type == "decoder":
+            # TransformerDecoder: self-attn among queries, cross-attn to memory
+            queries = self.core(tgt=queries, memory=memory)
+        else:
+            # MLP: pooled memory conditions each query
+            mem_pooled = memory.mean(dim=1)  # (B, D)
+            for layer in self.core:
+                mem_exp = mem_pooled.unsqueeze(1).expand(-1, N, -1)
+                x = torch.cat([queries, mem_exp, queries * mem_exp], dim=-1)
+                queries = queries + layer(x)
+
+        # Action head
+        actions = self.action_head(queries)
+        actions = actions.reshape(B, N, self.horizon, self.action_substeps, self.action_dim)
+        actions = (2 * torch.sigmoid(actions) - 1) * self.action_range
+        actions = actions.reshape(B, N, self.horizon, self.action_substeps * self.action_dim)
+
+        # Confidence head
+        conf = self.conf_head(queries)  # (B, N, 1)
+
+        return actions, conf
+
+
 class ARPredictor(nn.Module):
     """Autoregressive predictor for next-step embedding prediction."""
 

@@ -1,4 +1,4 @@
-# Ablation: direction consistency loss + scheduled sampling
+# Ablation: scheduled sampling only (direction loss removed)
 defaults:
   - ablation_dir
   - _self_

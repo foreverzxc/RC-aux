@@ -19,7 +19,6 @@ loss:
     one_step_anchor_weight: 0.0
     prefix_horizon: 0
     prefix_weight: 0.0
-    direction_weight: 0.1
     scheduled_sampling:
       enabled: true
       initial_prob: 0.5

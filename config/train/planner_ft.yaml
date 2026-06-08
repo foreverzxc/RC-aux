@@ -6,14 +6,13 @@ defaults:
 output_model_name: planner_ft
 
 # Limit dataset for quick experiments (null = full dataset)
-max_samples: 10
+max_samples: null
 
-# Shorter training
 trainer:
-  max_epochs: 20
+  max_epochs: 10
 
 loader:
-  batch_size: 2
+  batch_size: 4
   num_workers: 0
   persistent_workers: false
   prefetch_factor: null

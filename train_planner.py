@@ -17,6 +17,7 @@ if os.path.isdir(_hdf5_plugin_dir):
     os.environ.setdefault("HDF5_PLUGIN_PATH", _hdf5_plugin_dir)
 
 # Project root for resolving relative paths (e.g. checkpoints/ symlink)
+
 PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
 
 import h5py as _h5py
@@ -29,18 +30,24 @@ import torch
 from omegaconf import OmegaConf
 
 # Patch: disable SWMR mode to avoid NFS lock contention with multiple workers
-_orig_open_h5_planner = swm.data.HDF5Dataset._open_h5
-def _patched_open_h5_planner(self):
-    if self.is_remote:
-        import fsspec
-        scheme = self.h5_path.split('://', 1)[0]
-        fs = fsspec.filesystem(scheme, **self.storage_options)
-        return _h5py.File(fs.open(self.h5_path, 'rb'), 'r')
-    return _h5py.File(self.h5_path, 'r', rdcc_nbytes=256 * 1024 * 1024)
-swm.data.HDF5Dataset._open_h5 = _patched_open_h5_planner
+if hasattr(swm.data.HDF5Dataset, "_open_h5"):
+    _orig_open_h5_planner = swm.data.HDF5Dataset._open_h5
+    def _patched_open_h5_planner(self):
+        if self.is_remote:
+            import fsspec
+            scheme = self.h5_path.split('://', 1)[0]
+            fs = fsspec.filesystem(scheme, **self.storage_options)
+            return _h5py.File(fs.open(self.h5_path, 'rb'), 'r')
+        return _h5py.File(self.h5_path, 'r', rdcc_nbytes=256 * 1024 * 1024)
+    swm.data.HDF5Dataset._open_h5 = _patched_open_h5_planner
 
+from libero_dataset import LiberoGoalDataset
 from planner import PlannerDecoder, PlannerLoss, planner_rollout
 from utils import get_img_preprocessor
+
+# Suppress auto-saved environment.json / requirements_frozen.txt
+import stable_pretraining.callbacks.env_info as _env_info_cb
+_env_info_cb.EnvironmentDumpCallback.setup = lambda *a, **k: None
 
 
 class GoalCache:
@@ -133,7 +140,15 @@ def run(cfg):
     ##       dataset       ##
     #########################
 
-    if cfg.data.get("dataset_class"):
+    if cfg.data.get("dataset_type") == "libero_goal":
+        # LiberoGoalDataset reads native LIBERO HDF5 files
+        dataset_kwargs = OmegaConf.to_container(cfg.data.dataset, resolve=True)
+        dataset_kwargs.pop("keys_to_merge", None)
+        data_dir = dataset_kwargs.pop("data_dir")
+        if data_dir is not None and not os.path.isabs(data_dir):
+            data_dir = os.path.join(PROJECT_ROOT, data_dir)
+        dataset = LiberoGoalDataset(data_dir=data_dir, **dataset_kwargs, transform=None)
+    elif cfg.data.get("dataset_class"):
         dataset = hydra.utils.instantiate(cfg.data.dataset)
     else:
         dataset_cfg = OmegaConf.to_container(cfg.data.dataset, resolve=True)
@@ -271,9 +286,8 @@ def run(cfg):
             pl_callbacks.ModelCheckpoint(
                 dirpath="checkpoints",
                 filename="planner-{epoch:03d}-{val/loss:.4f}",
-                save_top_k=3,
-                monitor="val/loss",
-                mode="min",
+                save_top_k=-1,
+                every_n_epochs=1,
                 save_last=True,
             ),
         ],

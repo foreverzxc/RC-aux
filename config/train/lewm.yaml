@@ -20,6 +20,9 @@ patch_size: 14
 encoder_scale: tiny
 dump_object: True
 
+# Limit dataset for quick experiments (null = full dataset)
+max_samples: null
+
 init:
   weights_path: null
   strict: True
@@ -68,6 +71,7 @@ predictor:
   emb_dropout: 0.0
 
 loss:
+  prediction_type: multi_horizon
   reg_type: sigreg
   sigreg:
     weight: 0.09
@@ -107,7 +111,15 @@ loss:
     terminal_pred_weight: 0.0
     terminal_neg_weight: 1.0
   rollout:
-    direction_weight: 0.0          # weight for direction consistency loss
+    min_horizon: 1
+    max_horizon: 4
+    sample: true
+    curriculum_epochs: 4
+    weighting: linear
+    weight_power: 1.0
+    one_step_anchor_weight: 0.0
+    prefix_horizon: 0
+    prefix_weight: 0.0
     scheduled_sampling:
       enabled: false
       initial_prob: 0.5            # teacher forcing prob at epoch 0
@@ -118,3 +130,19 @@ loss:
     goal_cost_softmin_temperature: 1.0
     action_l2_cost_weight: 0.0
     action_smooth_cost_weight: 0.0
+  planner_head:
+    enabled: false
+    type: decoder                 # "mlp" or "decoder"
+    weight: 1.0
+    query_dim: 32                 # query token dimension (= reachability horizon_dim)
+    num_queries: 8
+    horizon: 5
+    num_layers: 3
+    num_heads: 8                  # only used when type="decoder"
+    mlp_dim: 1024
+    dropout: 0.1
+    diversity_weight: 0.1
+    conf_weight: 0.5
+    align_weight: 1.0           # stage 2: planner rollout → GT rollout
+    sft_weight: 1.0             # direct action imitation: planner → GT actions
+    freeze_wm_for_planner: true # stage 1 (true): stop_grad emb. stage 2 (false): full joint

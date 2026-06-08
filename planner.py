@@ -170,20 +170,12 @@ class PlannerLoss(nn.Module):
         # Best query per sample
         best_cost, best_idx = costs.min(dim=-1)  # (B,), (B,)
 
-        # ── Diversity loss (DETR-style) ──
-        best_actions = action_seqs[torch.arange(B), best_idx]  # (B, T, A)
-        div_loss = torch.tensor(0.0, device=action_seqs.device)
-        count = 0
-        for i in range(N):
-            mask = (best_idx != i)
-            if mask.any():
-                other = action_seqs[mask, i].reshape(mask.sum(), -1)
-                best_for = best_actions[mask].reshape(mask.sum(), -1)
-                sim = F.cosine_similarity(other, best_for, dim=-1)
-                div_loss += F.relu(sim - 0.0).mean()
-                count += 1
-        if count > 0:
-            div_loss = div_loss / count
+        # ── Ortho loss: pairwise cos² penalty, all N×(N-1) query pairs ──
+        flat_actions = action_seqs.reshape(B, N, -1)       # (B, N, T*A)
+        flat_actions = F.normalize(flat_actions, dim=-1)   # unit vectors
+        cos_mat = flat_actions @ flat_actions.transpose(-2, -1)  # (B, N, N)
+        off_mask = ~torch.eye(N, dtype=torch.bool, device=action_seqs.device)
+        div_loss = cos_mat[:, off_mask].pow(2).mean()      # push all off-diag → 0
 
         # ── Confidence loss (DETR-style: matched→1, unmatched→0) ──
         conf_loss = torch.tensor(0.0, device=action_seqs.device)

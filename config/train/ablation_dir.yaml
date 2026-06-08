@@ -1,10 +1,6 @@
-# Ablation: direction consistency loss only
+# Ablation: direction loss removed — identical to baseline
 defaults:
   - ablation_baseline
   - _self_
 
 output_model_name: ablation_dir
-
-loss:
-  rollout:
-    direction_weight: 0.1

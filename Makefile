@@ -61,14 +61,15 @@ train-planner:
 		wandb.enabled=$(WANDB) \
 		max_samples=$(PLANNER_MAX_SAMPLES)
 
-# ---- Compare rollout quality: baseline vs dir ----
-compare-rollout:
-	@echo "=== Comparing rollout: baseline vs dir ==="
-	$(PYTHON) scripts/viz/compare_rollout.py \
-		--baseline checkpoints/baseline/ablation_baseline_epoch_10_object.ckpt \
-		--dir checkpoints/dir/ablation_dir_epoch_10_object.ckpt \
-		--data $(DATA_DIR)/libero_goal \
-		--horizon 4 --num-samples 200
+# ---- Compare planner rollout: baseline vs dir ----
+compare-planners:
+	@echo "=== Comparing planners: baseline vs dir ==="
+	$(PYTHON) scripts/viz/compare_planners.py \
+		--wm-bl checkpoints/baseline/ablation_baseline_epoch_10_object.ckpt \
+		--planner-bl checkpoints/planner_baseline/last.ckpt \
+		--wm-dir checkpoints/dir/ablation_dir_epoch_10_object.ckpt \
+		--planner-dir checkpoints/planner_dir/last.ckpt \
+		--num-samples 200
 
 # ---- Cleanup ----
 OUTPUT_DIR ?= /root/autodl-tmp/rcaux-outputs

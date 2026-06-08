@@ -20,6 +20,7 @@ class JEPA(nn.Module):
         reachability_head=None,
         grounding_head=None,
         temporal_distance_head=None,
+        planner_head=None,
         use_reachability_cost=False,
         reachability_cost_weight=0.0,
         use_temporal_distance_cost=False,
@@ -41,6 +42,7 @@ class JEPA(nn.Module):
         self.reachability_head = reachability_head
         self.grounding_head = grounding_head
         self.temporal_distance_head = temporal_distance_head
+        self.planner_head = planner_head
         self.use_reachability_cost = use_reachability_cost
         self.reachability_cost_weight = reachability_cost_weight
         self.use_temporal_distance_cost = use_temporal_distance_cost
@@ -214,6 +216,13 @@ class JEPA(nn.Module):
         if head is None:
             raise RuntimeError("Temporal distance head is not available on this model.")
         return head(src_emb, goal_emb)
+
+    def plan_actions(self, ctx_emb, goal_emb):
+        """Generate action candidates from context + goal embeddings."""
+        head = getattr(self, "planner_head", None)
+        if head is None:
+            raise RuntimeError("Planner head is not available on this model.")
+        return head(ctx_emb, goal_emb)
 
     def criterion(self, info_dict: dict):
         """Compute the cost between predicted embeddings and goal embeddings."""
